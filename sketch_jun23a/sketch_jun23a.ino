@@ -154,23 +154,37 @@ void captureImage() {
   
   Serial.println("--- IMAGE DATA START ---");
   
-  uint8_t temp = 0, temp_last = 0;
-  length--;
+  // Use bulk SPI transfer for better performance
+  const size_t chunkSize = 128;
+  uint8_t buffer[chunkSize];
+  uint32_t bytesRemaining = length;
   
-  while (length--) {
-    temp_last = temp;
-    temp = SPI.transfer(0x00);
+  while (bytesRemaining > 0) {
+    size_t bytesToRead = min(chunkSize, bytesRemaining);
     
-    // Print as hex for debugging, or save to SD card
-    if (temp < 16) Serial.print("0");
-    Serial.print(temp, HEX);
-    Serial.print(" ");
+    // Fill buffer with zeros for SPI transfer
+    memset(buffer, 0x00, bytesToRead);
     
-    // JPEG end marker
-    if ((temp == 0xD9) && (temp_last == 0xFF)) {
-      break;
+    // Bulk SPI transfer
+    SPI.transfer(buffer, bytesToRead);
+    
+    // Print data as hex
+    for (size_t i = 0; i < bytesToRead; i++) {
+      if (buffer[i] < 16) Serial.print("0");
+      Serial.print(buffer[i], HEX);
+      Serial.print(" ");
+      
+      // Check for JPEG end marker
+      if (i > 0 && buffer[i] == 0xD9 && buffer[i-1] == 0xFF) {
+        Serial.println();
+        goto jpeg_end;
+      }
     }
+    
+    bytesRemaining -= bytesToRead;
   }
+  
+  jpeg_end:
   
   myCAM.CS_HIGH();
   Serial.println("\n--- IMAGE DATA END ---");
@@ -282,40 +296,46 @@ void handleCapture() {
   myCAM.CS_LOW();
   myCAM.set_fifo_burst();
   
-  // Use buffered transfer for better performance
-  const size_t bufferSize = 1024; // 1KB buffer
-  uint8_t buffer[bufferSize];
-  size_t bufferIndex = 0;
+  // Use optimized bulk SPI transfer for maximum performance
+  const size_t spiChunkSize = 512; // Optimal chunk size for SPI bulk transfer
+  uint8_t spiBuffer[spiChunkSize];
   uint32_t bytesRemaining = length;
   
   while (bytesRemaining > 0 && client.connected()) {
-    // Fill buffer
-    size_t bytesToRead = min(bufferSize - bufferIndex, bytesRemaining);
+    // Calculate how many bytes to read in this chunk
+    size_t bytesToRead = min(spiChunkSize, bytesRemaining);
     
-    for (size_t i = 0; i < bytesToRead; i++) {
-      buffer[bufferIndex + i] = SPI.transfer(0x00);
-    }
+    // Fill buffer with zeros (dummy data to send)
+    memset(spiBuffer, 0x00, bytesToRead);
     
-    bufferIndex += bytesToRead;
-    bytesRemaining -= bytesToRead;
+    // Bulk SPI transfer - much faster than individual transfers
+    SPI.transfer(spiBuffer, bytesToRead);
     
-    // Send buffer when full or when all data is read
-    if (bufferIndex == bufferSize || bytesRemaining == 0) {
-      size_t bytesWritten = client.write(buffer, bufferIndex);
+    // Send the received data to client
+    size_t bytesWritten = client.write(spiBuffer, bytesToRead);
+    
+    // Handle partial writes
+    if (bytesWritten < bytesToRead) {
+      // If not all bytes were written, we need to handle the remainder
+      size_t remainingBytes = bytesToRead - bytesWritten;
+      size_t offset = bytesWritten;
       
-      // Handle partial writes
-      if (bytesWritten < bufferIndex) {
-        // Move remaining data to beginning of buffer
-        memmove(buffer, buffer + bytesWritten, bufferIndex - bytesWritten);
-        bufferIndex -= bytesWritten;
-      } else {
-        bufferIndex = 0;
+      while (remainingBytes > 0 && client.connected()) {
+        size_t additionalWritten = client.write(spiBuffer + offset, remainingBytes);
+        offset += additionalWritten;
+        remainingBytes -= additionalWritten;
+        
+        if (additionalWritten == 0) {
+          delay(1); // Small delay if client is busy
+        }
       }
     }
     
-    // Small delay to prevent overwhelming the client
-    if (bufferIndex == 0) {
-      delay(1);
+    bytesRemaining -= bytesToRead;
+    
+    // Yield to prevent watchdog timeout on large images
+    if (bytesRemaining % (spiChunkSize * 4) == 0) {
+      yield();
     }
   }
   
