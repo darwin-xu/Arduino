@@ -61,8 +61,7 @@ void setup() {
   myCAM.set_format(JPEG);
   myCAM.InitCAM();
   myCAM.write_reg(ARDUCHIP_TIM, VSYNC_LEVEL_MASK);   // VSYNC is active HIGH
-  //myCAM.OV5642_set_JPEG_size(OV5642_320x240);        // Set initial resolution
-  myCAM.OV5642_set_JPEG_size(OV5642_2592x1944);        // Set initial resolution
+  myCAM.OV5642_set_JPEG_size(OV5642_320x240);        // Set initial resolution
   
   delay(1000);
   myCAM.clear_fifo_flag();
