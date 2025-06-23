@@ -219,15 +219,35 @@ void setupWebServer() {
   
   server.on("/", handleRoot);
   server.on("/capture", handleCapture);
+  server.on("/status", handleStatus);
   server.begin();
   Serial.println("Web server started");
 }
 
 void handleRoot() {
-  String html = "<html><body>";
-  html += "<h1>ArduCAM ESP32</h1>";
-  html += "<p><a href=\"/capture\">Capture Image</a></p>";
-  html += "</body></html>";
+  String html = "<!DOCTYPE html><html><head>";
+  html += "<meta charset='UTF-8'>";
+  html += "<meta name='viewport' content='width=device-width, initial-scale=1.0'>";
+  html += "<title>ArduCAM ESP32</title>";
+  html += "<style>";
+  html += "body { font-family: Arial, sans-serif; margin: 40px; background-color: #f5f5f5; }";
+  html += ".container { max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }";
+  html += "h1 { color: #333; text-align: center; margin-bottom: 30px; }";
+  html += ".btn { display: inline-block; padding: 12px 24px; margin: 10px; background-color: #007bff; color: white; text-decoration: none; border-radius: 5px; transition: background-color 0.3s; }";
+  html += ".btn:hover { background-color: #0056b3; }";
+  html += ".status { margin: 20px 0; padding: 15px; background-color: #e9f7ef; border-left: 4px solid #27ae60; }";
+  html += "</style></head><body>";
+  html += "<div class='container'>";
+  html += "<h1>ArduCAM ESP32 Control Panel</h1>";
+  html += "<div class='status'>";
+  html += "<strong>Status:</strong> Camera Ready<br>";
+  html += "<strong>IP Address:</strong> " + WiFi.localIP().toString() + "<br>";
+  html += "<strong>Free Heap:</strong> " + String(ESP.getFreeHeap()) + " bytes";
+  html += "</div>";
+  html += "<p><a href='/capture' class='btn'>📸 Capture Image</a></p>";
+  html += "<p><a href='/status' class='btn'>🔍 Check Status</a></p>";
+  html += "<p><small>Tip: The capture endpoint streams JPEG data directly to your browser</small></p>";
+  html += "</div></body></html>";
   server.send(200, "text/html", html);
 }
 
@@ -252,22 +272,68 @@ void handleCapture() {
   server.send(200, "image/jpeg", "");
   
   WiFiClient client = server.client();
+  
+  // Check if client is still connected
+  if (!client.connected()) {
+    myCAM.clear_fifo_flag();
+    return;
+  }
+  
   myCAM.CS_LOW();
   myCAM.set_fifo_burst();
   
-  uint8_t temp = 0, temp_last = 0;
-  length--;
+  // Use buffered transfer for better performance
+  const size_t bufferSize = 1024; // 1KB buffer
+  uint8_t buffer[bufferSize];
+  size_t bufferIndex = 0;
+  uint32_t bytesRemaining = length;
   
-  while (length--) {
-    temp_last = temp;
-    temp = SPI.transfer(0x00);
-    client.write(temp);
+  while (bytesRemaining > 0 && client.connected()) {
+    // Fill buffer
+    size_t bytesToRead = min(bufferSize - bufferIndex, bytesRemaining);
     
-    if ((temp == 0xD9) && (temp_last == 0xFF)) {
-      break;
+    for (size_t i = 0; i < bytesToRead; i++) {
+      buffer[bufferIndex + i] = SPI.transfer(0x00);
+    }
+    
+    bufferIndex += bytesToRead;
+    bytesRemaining -= bytesToRead;
+    
+    // Send buffer when full or when all data is read
+    if (bufferIndex == bufferSize || bytesRemaining == 0) {
+      size_t bytesWritten = client.write(buffer, bufferIndex);
+      
+      // Handle partial writes
+      if (bytesWritten < bufferIndex) {
+        // Move remaining data to beginning of buffer
+        memmove(buffer, buffer + bytesWritten, bufferIndex - bytesWritten);
+        bufferIndex -= bytesWritten;
+      } else {
+        bufferIndex = 0;
+      }
+    }
+    
+    // Small delay to prevent overwhelming the client
+    if (bufferIndex == 0) {
+      delay(1);
     }
   }
   
   myCAM.CS_HIGH();
   myCAM.clear_fifo_flag();
+  
+  if (!client.connected()) {
+    Serial.println("Client disconnected during transfer");
+  }
+}
+
+void handleStatus() {
+  String json = "{";
+  json += "\"status\": \"online\",";
+  json += "\"freeHeap\": " + String(ESP.getFreeHeap()) + ",";
+  json += "\"uptime\": " + String(millis()) + ",";
+  json += "\"wifiRSSI\": " + String(WiFi.RSSI()) + ",";
+  json += "\"ipAddress\": \"" + WiFi.localIP().toString() + "\"";
+  json += "}";
+  server.send(200, "application/json", json);
 }
