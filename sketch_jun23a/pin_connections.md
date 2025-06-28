@@ -34,3 +34,5 @@ The updated code now uses the correct pin definitions for the Arduino Nano ESP32
 - https://docs.arduino.cc/resources/pinouts/ABX00083-full-pinout.pdf
 - https://docs.arduino.cc/resources/datasheets/ABX00083-datasheet.pdf
 - https://www.arducam.com/arducam-5mp-plus-spi-cam-arduino-ov5642.html
+- https://cdn.sparkfun.com/datasheets/Sensors/ForceFlex/hx711_english.pdf
+- https://www.instructables.com/Arduino-Scale-With-5kg-Load-Cell-and-HX711-Amplifi/

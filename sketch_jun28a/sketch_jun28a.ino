@@ -7,6 +7,14 @@
 #include "ArduCAM.h"
 #include "ov5642_regs.h"
 
+// HX711 Scale circuit
+#include "HX711.h"
+
+#define DOUT 2  // DT to D2
+#define CLK 3   // SCK to D3
+
+HX711 scale;
+
 // Pin definitions for Arduino Nano ESP32
 #define CS_PIN 10    // D10
 // SDA and SCL use default I2C pins (A4, A5)
@@ -69,6 +77,20 @@ void setup() {
   // Optional: Setup WiFi and web server
   setupWiFi();
   setupWebServer();
+
+  // Init scale
+  Serial.println("Initializing the scale");
+  scale.begin(DOUT, CLK);
+
+  // Reset the scale to 0
+  scale.tare();
+  
+  // Calibration factor will be the (reading) / (known weight)
+  // Adjust this calibration factor as needed
+  scale.set_scale(2280.f);    // this value is obtained by calibrating the scale with known weights
+  if (scale.is_ready()) {
+    Serial.println("Setup complete. Scale ready!");
+  }
   
   Serial.println("Setup complete. Camera ready!");
   Serial.println("Commands:");
@@ -119,8 +141,11 @@ void loop() {
       Serial.println("Resolution set to 2592x1944 (5MP)");
     }
   }
+
+  Serial.println("scale.read() = " + String(scale.read()));
+  Serial.println("scale.get_units() = " + String(scale.get_units()));
   
-  delay(10);
+  delay(500);
 }
 
 void captureImage() {
