@@ -81,16 +81,16 @@ void setup() {
   // Init scale
   Serial.println("Initializing the scale");
   scale.begin(DOUT, CLK);
-
-  // Reset the scale to 0
-  scale.tare();
   
   // Calibration factor will be the (reading) / (known weight)
   // Adjust this calibration factor as needed
-  scale.set_scale(2280.f);    // this value is obtained by calibrating the scale with known weights
+  scale.set_scale(398.f);    // this value is obtained by calibrating the scale with known weights
   if (scale.is_ready()) {
     Serial.println("Setup complete. Scale ready!");
   }
+
+  // Reset the scale to 0
+  scale.tare();
   
   Serial.println("Setup complete. Camera ready!");
   Serial.println("Commands:");
