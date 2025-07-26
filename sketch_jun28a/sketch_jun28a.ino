@@ -2,6 +2,8 @@
 #include <SPI.h>
 #include <WiFi.h>
 #include <WebServer.h>
+#include <HTTPClient.h>
+#include <WiFiClient.h>
 
 // ArduCam library - you'll need to install this from Library Manager
 #include "ArduCAM.h"
@@ -28,6 +30,14 @@ const char* password = "opop9090";
 
 // Web server on port 80
 WebServer server(80);
+
+// Server configuration
+const char* serverURL = "http://192.168.2.123:3000/api/analyze-food";
+
+// State tracking
+bool weightDetected = false;
+unsigned long lastWeightCheck = 0;
+const unsigned long WEIGHT_DEBOUNCE_TIME = 2000; // 2 seconds debounce
 
 void setup() {
   Serial.begin(115200);
@@ -142,8 +152,39 @@ void loop() {
     }
   }
 
-  Serial.println("scale.read() = " + String(scale.read()));
-  Serial.println("scale.get_units() = " + String(scale.get_units()));
+  //Serial.println("scale.read() = " + String(scale.read()));
+  //Serial.println("scale.get_units() = " + String(scale.get_units()));
+  // if weight is heavier than 100 grams, capture an image and upload to
+  // server.
+
+  float currentWeight = scale.get_units();
+  unsigned long currentTime = millis();
+  
+  // Check if weight exceeds threshold and debounce to prevent multiple uploads
+  if (currentWeight > 100 && !weightDetected && (currentTime - lastWeightCheck > WEIGHT_DEBOUNCE_TIME)) {
+    Serial.println("Weight exceeded threshold: " + String(currentWeight) + "g, capturing image...");
+    
+    // Capture the image and send it to the server hosted on HTTP://192.168.2.123:3000/api/analyze-food
+    // Using MIME Multipart Media Encapsulation
+    // There are two parts of the content:
+    // 1. The image data, in JPEG format, the name is "foodImage" and the value is the image data.
+    // 2. The scale data, in text, the name is "weight" and the value is the weight in grams.
+    
+    if (captureAndUploadImage(currentWeight)) {
+      weightDetected = true;
+      lastWeightCheck = currentTime;
+      Serial.println("Image uploaded successfully!");
+    } else {
+      Serial.println("Failed to upload image");
+      lastWeightCheck = currentTime; // Still update to prevent spam
+    }
+  }
+  
+  // Reset weight detection when weight drops below threshold
+  if (currentWeight < 50 && weightDetected) {
+    Serial.println("Weight removed, ready for next detection");
+    weightDetected = false;
+  }
   
   delay(500);
 }
@@ -381,4 +422,159 @@ void handleStatus() {
   json += "\"ipAddress\": \"" + WiFi.localIP().toString() + "\"";
   json += "}";
   server.send(200, "application/json", json);
+}
+
+bool captureAndUploadImage(float weight) {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi not connected, cannot upload");
+    return false;
+  }
+  
+  Serial.println("Starting image capture for upload...");
+  
+  // Capture image
+  myCAM.flush_fifo();
+  myCAM.clear_fifo_flag();
+  myCAM.start_capture();
+  
+  // Wait for capture to complete
+  while (!myCAM.get_bit(ARDUCHIP_TRIG, CAP_DONE_MASK));
+  
+  uint32_t length = myCAM.read_fifo_length();
+  Serial.print("Captured image size: ");
+  Serial.print(length);
+  Serial.println(" bytes");
+  
+  if (length >= MAX_FIFO_SIZE || length == 0) {
+    Serial.println("Image capture failed - invalid size");
+    myCAM.clear_fifo_flag();
+    return false;
+  }
+  
+  // Create WiFi client and connect to server
+  WiFiClient client;
+  
+  // Parse server URL (assuming http://192.168.2.123:3000/api/analyze-food)
+  const char* host = "192.168.2.123";
+  const int port = 3000;
+  const char* path = "/api/analyze-food";
+  
+  if (!client.connect(host, port)) {
+    Serial.println("Connection to server failed");
+    myCAM.clear_fifo_flag();
+    return false;
+  }
+  
+  Serial.println("Connected to server, sending data...");
+  
+  // Generate boundary for multipart
+  String boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW";
+  
+  // Prepare multipart data parts
+  String weightPart = "--" + boundary + "\r\n";
+  weightPart += "Content-Disposition: form-data; name=\"weight\"\r\n\r\n";
+  weightPart += String(weight, 2) + "\r\n";
+  
+  String imagePart = "--" + boundary + "\r\n";
+  imagePart += "Content-Disposition: form-data; name=\"foodImage\"; filename=\"food.jpg\"\r\n";
+  imagePart += "Content-Type: image/jpeg\r\n\r\n";
+  
+  String endBoundary = "\r\n--" + boundary + "--\r\n";
+  
+  // Calculate total content length
+  size_t totalLength = weightPart.length() + imagePart.length() + length + endBoundary.length();
+  
+  // Send HTTP headers
+  client.print("POST " + String(path) + " HTTP/1.1\r\n");
+  client.print("Host: " + String(host) + ":" + String(port) + "\r\n");
+  client.print("Content-Type: multipart/form-data; boundary=" + boundary + "\r\n");
+  client.print("Content-Length: " + String(totalLength) + "\r\n");
+  client.print("Connection: close\r\n\r\n");
+  
+  // Send weight part
+  client.print(weightPart);
+  
+  // Send image part header
+  client.print(imagePart);
+  
+  // Send image data using optimized SPI transfer
+  myCAM.CS_LOW();
+  myCAM.set_fifo_burst();
+  
+  const size_t chunkSize = 512;
+  uint8_t buffer[chunkSize];
+  uint32_t bytesRemaining = length;
+  size_t totalSent = 0;
+  
+  while (bytesRemaining > 0 && client.connected()) {
+    size_t bytesToRead = min(chunkSize, bytesRemaining);
+    
+    // Fill buffer with zeros for SPI transfer
+    memset(buffer, 0x00, bytesToRead);
+    
+    // Bulk SPI transfer
+    SPI.transfer(buffer, bytesToRead);
+    
+    // Send to server
+    size_t bytesWritten = client.write(buffer, bytesToRead);
+    totalSent += bytesWritten;
+    
+    if (bytesWritten != bytesToRead) {
+      Serial.println("Warning: Partial write to server");
+      break;
+    }
+    
+    bytesRemaining -= bytesToRead;
+    
+    // Progress indicator
+    if (totalSent % 2048 == 0) {
+      Serial.print(".");
+    }
+    
+    // Yield to prevent watchdog timeout
+    yield();
+  }
+  
+  Serial.println(); // New line after progress dots
+  
+  myCAM.CS_HIGH();
+  myCAM.clear_fifo_flag();
+  
+  if (!client.connected()) {
+    Serial.println("Connection lost during image transfer");
+    return false;
+  }
+  
+  // Send end boundary
+  client.print(endBoundary);
+  
+  Serial.println("Data sent, waiting for response...");
+  
+  // Wait for response
+  unsigned long timeout = millis() + 10000; // 10 second timeout
+  String response = "";
+  
+  while (client.connected() && millis() < timeout) {
+    if (client.available()) {
+      response += client.readString();
+      break;
+    }
+    delay(10);
+  }
+  
+  client.stop();
+  
+  if (response.length() > 0) {
+    Serial.println("Server response received:");
+    Serial.println(response);
+    
+    // Check if response indicates success (look for HTTP 200)
+    if (response.indexOf("200 OK") >= 0 || response.indexOf("201") >= 0) {
+      return true;
+    }
+  } else {
+    Serial.println("No response from server (timeout)");
+  }
+  
+  return false;
 }
